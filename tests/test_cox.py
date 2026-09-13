@@ -1,10 +1,10 @@
 """The Cox model, the proportionality check, the immortal-time bias, and held-out evaluation.
 
-The most valuable tests here are the two that need no simulation: one full partial likelihood computed on
-paper, and the Efron/Breslow tie contributions computed on paper. Everything after that -- the analytic
-gradient against central differences, the score vanishing at the maximum, the score residuals summing to the
-score -- is an identity that must hold exactly, which is a stronger check than any comparison against another
-library's answer.
+The most valuable tests here need no simulation: one full partial likelihood and the Efron/Breslow tie
+contributions, both worked out on paper in the docstrings. After that come identities that must hold
+exactly -- the analytic gradient against central differences, the score vanishing at the maximum, the score
+residuals summing to the score, Cholesky against a hand-inverted 2x2. An identity binds harder than a
+comparison against another library's output, because it cannot be satisfied by two errors that agree.
 
 Where two estimators see identical data (Efron against Breslow, naive against time-varying, truncated
 against untruncated) the difference is deterministic and the assertion is on its sign. Where an estimate is
@@ -134,14 +134,16 @@ class TestPartialLikelihood:
                 assert information[i][j] == pytest.approx(information[j][i], rel=1e-12)
         cox.cholesky(information)  # raises if it is not positive definite
 
-    def test_cholesky_solve_inverts_a_known_matrix(self):
-        matrix = [[4.0, 1.0], [1.0, 3.0]]  # determinant 11
+    def test_cholesky_solve_against_a_hand_inverted_matrix(self):
+        """[[4, 1], [1, 3]] has determinant 11 and inverse (1/11)[[3, -1], [-1, 4]]."""
+        matrix = [[4.0, 1.0], [1.0, 3.0]]
         solution = cox.cholesky_solve(matrix, [1.0, 2.0])
         assert solution[0] == pytest.approx(1.0 / 11.0, rel=1e-12)
         assert solution[1] == pytest.approx(7.0 / 11.0, rel=1e-12)
-        identity = cox.inverse(matrix)
-        assert identity[0][0] == pytest.approx(3.0 / 11.0, rel=1e-12)
-        assert identity[0][1] == pytest.approx(-1.0 / 11.0, rel=1e-12)
+        inverted = cox.inverse(matrix)
+        assert inverted[0][0] == pytest.approx(3.0 / 11.0, rel=1e-12)
+        assert inverted[0][1] == pytest.approx(-1.0 / 11.0, rel=1e-12)
+        assert inverted[1][1] == pytest.approx(4.0 / 11.0, rel=1e-12)
 
 
 class TestFitting:
@@ -154,7 +156,7 @@ class TestFitting:
 
     def test_score_residuals_sum_to_the_score(self):
         """An exact identity: within each risk set the weighted residuals sum to zero, so the cross terms
-        cancel and what is left is the Breslow score. The robust variance depends on this entirely."""
+        cancel and what remains is the Breslow score. The robust variance depends on this entirely."""
         cohort = data.weibull_ph(n=250, seed=28)
         beta = [0.4, -0.3, 0.2]
         totals = [0.0, 0.0, 0.0]
@@ -186,9 +188,9 @@ class TestFitting:
     def test_breslow_shrinks_towards_zero_when_ties_are_heavy(self):
         """Efron is the default for a measurable reason, not a stylistic one.
 
-        Both estimators see identical data, so the difference between them carries no sampling error and the
-        assertion can be on its sign. Which of the two lands closer to the truth on a single draw *does*
-        involve sampling error, so that is deliberately not asserted.
+        Both estimators see identical data, so the difference carries no sampling error and the assertion
+        can be on its sign. Which of the two lands closer to the truth on a single draw *does* involve
+        sampling error, so that is deliberately not asserted.
         """
         cohort = data.weibull_ph(n=1200, seed=32)
         rounded = Cohort(
@@ -240,23 +242,34 @@ class TestFitting:
     def test_baseline_hazard_is_non_decreasing(self):
         cohort = data.weibull_ph(n=300, seed=50)
         fit = cox.fit(cohort)
-        baseline = cox.baseline_cumulative_hazard(list(cohort.rows), fit.beta)
-        values = [hazard for _, hazard in baseline]
+        values = [
+            hazard for _, hazard in cox.baseline_cumulative_hazard(list(cohort.rows), fit.beta)
+        ]
         assert values == sorted(values)
         assert values[0] > 0.0
 
-    def test_predicted_curves_never_cross(self):
-        """A structural consequence of the model: every curve is the baseline raised to a power.
+    def test_predicted_curves_cannot_cross(self):
+        """A structural consequence: every predicted curve is the baseline curve raised to a power.
 
-        This is not a nice property, it is the assumption. Data whose groups really do cross cannot be
-        represented at all, which is why the proportionality test comes before any prediction is trusted.
+        The customer with the larger linear predictor has the higher hazard, so their survival curve lies
+        below the other's at *every* horizon. This is not a nice property of the implementation, it is the
+        proportional hazards assumption showing through -- data whose groups genuinely cross cannot be
+        represented at all, which is why the Schoenfeld check comes before any prediction is trusted.
         """
         cohort = data.weibull_ph(n=300, seed=51)
         fit = cox.fit(cohort)
         baseline = cox.baseline_cumulative_hazard(list(cohort.rows), fit.beta)
-        low = cox.predicted_survival(baseline, fit.beta, (0.0, 0.0, 1.5))
-        high = cox.predicted_survival(baseline, fit.beta, (1.0, 1.0, -1.5))
-        assert all(first >= second for (_, first), (_, second) in zip(low, high))
+        risky = (0.0, 0.0, 1.5)  # engagement enters with a positive coefficient in this generator
+        safe = (1.0, 1.0, -1.5)
+        assert sum(b * v for b, v in zip(fit.beta, risky)) > sum(
+            b * v for b, v in zip(fit.beta, safe)
+        )
+        risky_curve = cox.predicted_survival(baseline, fit.beta, risky)
+        safe_curve = cox.predicted_survival(baseline, fit.beta, safe)
+        assert all(
+            risky_survival <= safe_survival
+            for (_, risky_survival), (_, safe_survival) in zip(risky_curve, safe_curve)
+        )
 
 
 class TestProportionalHazards:
@@ -274,7 +287,7 @@ class TestProportionalHazards:
             assert abs(result.correlation) < 0.15, result.summary()
 
     def test_the_permutation_p_value_is_never_exactly_zero(self):
-        """Add-one smoothing: 1000 permutations cannot support a claim of p < 0.001."""
+        """Add-one smoothing: 200 permutations cannot support a claim below 1/201."""
         cohort = data.non_proportional(n=400, seed=52)
         fit = cox.fit(cohort)
         result = cox.test_proportionality(list(cohort.rows), fit, permutations=200)[0]
