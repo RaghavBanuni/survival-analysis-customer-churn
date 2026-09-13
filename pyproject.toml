@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "survival-analysis-customer-churn"
+version = "1.0.0"
+description = "Kaplan-Meier, log-rank, Cox proportional hazards and censoring-aware evaluation, written from scratch in pure Python"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Raghav Banuni" }]
+keywords = ["survival-analysis", "churn", "cox-regression", "kaplan-meier", "censoring"]
+classifiers = [
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3.10",
+  "Topic :: Scientific/Engineering :: Mathematics",
+]
+# No runtime dependencies, and that is the point: everything here is derived and implemented rather
+# than delegated. lifelines and scikit-survival are the right choice for production work.
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=7.4"]
+
+[project.scripts]
+survival-demo = "survival.cli:main"
+
+[tool.setuptools]
+packages = ["survival"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# Registered so that `-m "not slow"` is a documented option rather than a warning. The slow tests are
+# the time-varying fits, where thousands of interval rows meet a pure-Python risk-set loop.
+markers = ["slow: end-to-end fits that take tens of seconds"]
+filterwarnings = ["error"]
